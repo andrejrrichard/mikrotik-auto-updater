@@ -1,0 +1,20 @@
+{
+  "_comment": "Modèle de configuration pour mikrotik-auto-updater. Copiez ce fichier vers app_config.json et remplissez vos valeurs. Ne versionnez JAMAIS app_config.json (il contient des mots de passe)",
+  "routers": [
+    {
+      "ip": "192.168.88.1",
+      "user": "api-updater",
+      "password": "CHANGEZ_MOI"
+    },
+    {
+      "ip": "192.168.88.2",
+      "user": "api-updater",
+      "password": "CHANGEZ_MOI"
+    }
+  ],
+  "settings": {
+    "_comment": "Paramètres globaux appliqués à tous les routeurs",
+    "rss_url": "https://cdn.mikrotik.com/routeros/latest-stable.rss",
+    "verify_ssl": false
+  }
+}
