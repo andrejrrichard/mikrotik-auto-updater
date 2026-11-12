@@ -1,33 +1,47 @@
 # MikroTik Auto Updater
-
 Outil Python de mise à jour automatique de routeur(s) MikroTik.
 
-## 🎯 Objectif
 
+## 🎯 Objectif
 Ce script se connecte à une liste de routeurs MikroTik via leur API REST, lit leur version de RouterOS installée, la compare avec la dernière version disponible (via le flux RSS officiel de MikroTik), et déclenche la mise à jour si nécessaire de RouterOS et RouterBOARD.
 
-## ✨ Fonctionnalités
 
+## ✨ Fonctionnalités
 - Lecture de la version cible depuis le flux RSS officiel.
 - Connexion sécurisée aux routeurs via HTTPS (certificats auto-signés tolérés).
-- Comparaison fiable entre version installée et version cible (internet).
-- Synchronisation automatique du channel de mise à jour (stable, testing, long-term).
-- Mise à jour de RouterOS et RouterBOARD.
-- Traitement séquentiel de plusieurs routeurs.
-- Gestion des erreurs par routeur (un échec n'arrête pas les autres).
+- Alignement du channel de mise à jour sur celui du flux RSS.
+- Mise à jour de RouterOS puis de RouterBOARD avec la version cible.
+- Traitement **en parallèle** de tous les routeurs, en deux phases :
+  1. Téléchargement (tous les routeurs en même temps).
+  2. Mise à jour (reboot + attente de retour en ligne, tous en même temps).
+- Un routeur injoignable ou en échec n'arrête pas les autres.
+
 
 ## 🔐 Sécurité
-
 L'utilisateur API des routeurs doit avoir les policies minimales : api, rest-api, read, write, reboot.
 L'accès à l'API REST doit être restreint à l'adresse IP du PC de gestion (via le champ address du service www-ssl).
 
-## ⚠️ Limitations connues
 
+## 📊 Status
+| Statut | Signification |
+|--------|---------------|
+| UPGRADE_COMPLETE | RouterOS et RouterBOARD à jour |
+| ROUTEROS_UPDATED | RouterOS à jour, RouterBOARD non vérifié |
+| ROUTEROS_DOWNLOADED | Paquet téléchargé, reboot non effectué |
+| ROUTEROS_UPDATED_FAILED | Reboot fait, mais RouterOS pas à jour |
+| ROUTERBOARD_UPDATE_FAILED | RouterBOARD pas à jour après upgrade |
+| DOWNLOAD_TIMEOUT | Téléchargement non terminé |
+| REBOOT_TIMEOUT | Reboot non confirmé |
+| OFFLINE | Routeur injoignable |
+| UNKNOWN | Statut initial, jamais atteint en fin normale (signale un bug) |
+
+
+## ⚠️ Limitations connues
 Le script suppose que le PC exécutant le script a accès à internet pour lire le flux RSS.
 Le script suppose que le routeur a accès à internet pour obtenir le package à mettre à jour.
 
-## Helper
 
+## Helper
 # 1. Créer le groupe avec les policies minimales
 /user group add name=api-updater policy=api,rest-api,read,write,reboot,policy,test,local,!telnet,!ssh,!ftp,!winbox,!password,!web,!sniff,!sensitive,!romon
 

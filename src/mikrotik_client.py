@@ -1,79 +1,214 @@
-import requests
-import urllib3
-from typing import Optional, Dict, Any
+import asyncio
+import aiohttp
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from datetime import datetime
+from dataclasses import dataclass
+from typing import Any, Optional
+
+
+@dataclass
+class Result:
+    value: Optional[Any]
+    success: bool
+
 
 class MikrotikClient:
-    def __init__(
-        self,
-        ip: str,
-        username: str,
-        password: str,
-        verify_ssl: bool
-    ):
-        self.ip = ip
-        self.base_url = f"https://{ip}/rest"
-        self.session = requests.Session()
-        self.session.auth = (username, password)
-        self.session.verify = verify_ssl
+    def __init__(self, name, ip, username, password, verify_ssl,
+            download_timeout, reboot_timeout,
+            desired_version, desired_channel):
+        self._name = name
+        self._ip = ip
+        self._username = username
+        self._password = password
+        self._verify_ssl = verify_ssl
+        self._desired_version = desired_version
+        self._desired_channel = desired_channel
+        self._download_timeout = download_timeout
+        self._reboot_timeout = reboot_timeout
+        self._base_url = f"https://{ip}/rest"
+        self._status = "UNKNOWN"
 
-    def _get(self, endpoint: str) -> Any:
-        url = f"{self.base_url}{endpoint}"
-        response = self.session.get(url, timeout=5)
-        response.raise_for_status()
-        return response.json()
+    def _session(self):
+        return aiohttp.ClientSession(
+            auth=aiohttp.BasicAuth(self._username, self._password),
+            connector=aiohttp.TCPConnector(ssl=self._verify_ssl),
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
 
-    def _post(self, endpoint: str, data: Optional[Dict] = None) -> Any:
-        url = f"{self.base_url}{endpoint}"
-        response = self.session.post(url, json=data, timeout=5)
-        response.raise_for_status()
-        return response.json() if response.content else None
 
-    def _execute(self, script: str) -> Any:
-        return self._post("/execute", {"script": script})
-    
-    def get_update_channel(self) -> str:
-        status = self._get("/system/package/update")
-        return status.get("channel", "stable")
+    async def _get(self, session, endpoint):
+        async with session.get(f"{self._base_url}{endpoint}") as r:
+            r.raise_for_status()
+            return await r.json()
 
-    def set_update_channel(self, channel: str) -> None:
-        self._execute(f"/system/package/update/set channel={channel}")
 
-    def get_routeros(self) -> str:
-        status = self._get("/system/package/update")
-        return status.get("installed-version", "inconnue")
+    async def _post(self, session, endpoint, data=None):
+        headers = {"Content-Type": "application/json"}
+        async with session.post(f"{self._base_url}{endpoint}", json=data, headers=headers) as r:
+            r.raise_for_status()
+            return await r.json() if r.content_length else None
 
-    def get_routerboard(self) -> Dict:
-        return self._get("/system/routerboard")
 
-    def download_update(self) -> None:
-        self._post("/system/package/update/download", {"once": ""})
+    async def _execute(self, session, script):
+        return await self._post(session, "/execute", {"script": script})
 
-    def get_update_status(self) -> Dict:
-        return self._get("/system/package/update")
 
-    def upgrade_routerboard(self) -> None:
-        self._execute("/system/routerboard/upgrade")
-
-    def reboot(self) -> None:
-        self._execute("/system/reboot")
-
-    def is_alive(self) -> bool:
+    async def _request(self, request) -> Result:
         try:
-            data = self._get("/system/resource")
-            # Vérifier que c'est un dictionnaire non vide avec au moins un champ
-            if isinstance(data, dict) and "version" in data:
+            return Result(await request, True)
+        except Exception as e:
+            self._status = "OFFLINE"
+            return Result(None, False)
+
+
+    async def _reboot(self, session):
+        if not (await self._request(
+            self._execute(session, "/system/reboot")
+        )).success:
+            return False
+        await asyncio.sleep(15)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._reboot_timeout
+        while loop.time() < deadline:
+            try:
+                await self._get(session, "/system/resource")
+                await asyncio.sleep(15)
                 return True
+            except Exception:
+                await asyncio.sleep(10)
+        self._status = "REBOOT_TIMEOUT"
+        return False
+
+
+    async def _is_routeros_updated(self, session) -> bool:
+        result = await self._request(
+            self._get(session, "/system/package/update")
+        )
+        if not result.success:
             return False
-        except requests.RequestException:
-            return False
+        update = result.value
 
-    def close(self) -> None:
-        self.session.close()
+        channel = update.get("channel")
+        if channel != self._desired_channel:
+            if not (await self._request(
+                self._execute(
+                    session,
+                    f"/system/package/update/set channel={self._desired_channel}",
+                )
+            )).success:
+                return False
+            result = await self._request(
+                self._get(session, "/system/package/update")
+            )
+            if not result.success:
+                return False
+            update = result.value
 
-    def __enter__(self):
-        return self
+        return update.get("installed-version", "?") == self._desired_version
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+
+    async def _download_routeros(self, session):
+        if await self._is_routeros_updated(session):
+            self._status = "ROUTEROS_UPDATED"
+            return
+        if self._status == "OFFLINE":
+            return
+
+        if not (await self._request(
+            self._post(session, "/system/package/update/download")
+        )).success:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._download_timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(5)
+            result = await self._request(
+                self._get(session, "/system/package/update")
+            )
+            if not result.success:
+                continue
+            status = result.value.get("status", "").lower()
+            if "please reboot" in status:
+                self._status = "ROUTEROS_DOWNLOADED"
+                return
+            if "downloading" not in status and status != "":
+                await self._request(
+                    self._post(session, "/system/package/update/download")
+                )
+        self._status = "DOWNLOAD_TIMEOUT"
+
+
+    async def _is_routerboard_updated(self, session) -> bool:
+        for num_try in range(3):
+            result = await self._request(
+                self._get(session, "/system/routerboard")
+            )
+            if result.success:
+                rb = result.value
+                new = rb.get("upgrade-firmware")
+                cur = rb.get("current-firmware", "?")
+                return bool(new) and new == cur
+            await asyncio.sleep(10)
+        return False
+
+
+    async def _update_routerboard(self, session):
+        if await self._is_routerboard_updated(session):
+            self._status = "UPGRADE_COMPLETE"
+            return
+        if self._status == "OFFLINE":
+            return
+
+        if not (await self._request(
+            self._execute(session, "/system/routerboard/upgrade")
+        )).success:
+            return
+        if not await self._reboot(session):
+            return
+        if await self._is_routerboard_updated(session):
+            self._status = "UPGRADE_COMPLETE"
+        elif self._status != "OFFLINE":
+            self._status = "ROUTERBOARD_UPDATE_FAILED"
+
+
+    async def _update_routeros(self, session):
+        if self._status == "ROUTEROS_UPDATED":
+            return True
+        if self._status == "ROUTEROS_DOWNLOADED":
+            if not await self._reboot(session):
+                return False
+            if await self._is_routeros_updated(session):
+                self._status = "ROUTEROS_UPDATED"
+                return True
+            self._status = "ROUTEROS_UPDATED_FAILED"
+        return False
+
+
+    def get_name(self):
+        return self._name
+
+
+    def get_ip(self):
+        return self._ip
+
+
+    def get_status(self):
+        return self._status
+
+
+    async def get_routeros(self):
+        try:
+            async with self._session() as session:
+                await self._download_routeros(session)
+        except Exception:
+            pass
+
+
+    async def update(self):
+        try:
+            async with self._session() as session:
+                if await self._update_routeros(session):
+                    await self._update_routerboard(session)
+        except Exception:
+            pass
